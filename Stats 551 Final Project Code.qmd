@@ -1,0 +1,471 @@
+---
+title: "Stats 551 Final Project"
+author: "Alyssa Yang"
+format: pdf
+---
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(rstan)
+library(bayesplot)
+library(gridExtra)
+library(rstanarm)
+```
+
+
+
+# EDA
+```{r}
+# Read in plant data
+plant <- read.csv("plant_moniter_health_data.csv")
+
+# Rename columns
+colnames(plant) <- c("plant_id", "temp", "humidity", "soil_moisture", "soil_ph", 
+                     "nutrient_level", "light_intensity", "health_score", "health_status")
+```
+
+```{r}
+# Find types of variables
+sapply(plant, typeof)
+```
+
+
+```{r}
+# Change health_status to categorical variable
+plant$health_status <- as.character(plant$health_status)
+```
+
+```{r}
+# Find if there are any missing values
+sum(is.na(plant))
+```
+
+
+
+## Univariate summaries
+
+```{r}
+# Find summaries of numeric variables
+summary(plant[sapply(plant, is.numeric)])
+```
+
+```{r}
+# Select only numeric variables
+numeric_vars <- plant %>%
+  select(-plant_id, -health_status) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value")
+
+# Create histograms of numeric variables
+numeric_plots <- ggplot(numeric_vars, aes(x = value)) +
+  geom_histogram(bins = 30, color = "black", fill = "skyblue") +
+  facet_wrap(~ variable, scales = "free", ncol = 3) + 
+  labs(title = "Histograms of Numeric Variables", 
+       x = "Value", 
+       y = "Count")
+
+ggsave("numeric_variables.png", plot = numeric_plots, width = 8, height = 6, dpi = 300)
+numeric_plots
+```
+
+```{r}
+# Find counts for health status
+table(plant$health_status)
+```
+
+```{r}
+# Create bar chart for health status
+health_status <- ggplot(plant, aes(x = factor(health_status), fill = factor(health_status))) +
+  geom_bar(color = "black") +
+  scale_fill_manual(values = c("red", "green")) +
+  labs(title = "Counts of Health Status",
+       x = "Health Status (0 = Unhealthy, 1 = Healthy)",
+       y = "Count",
+       fill = "Health Status")
+
+ggsave("health_status.png", plot = health_status, width = 5, height = 3, dpi = 300)
+health_status
+```
+
+
+
+## Summaries across health status
+```{r}
+# Split the dataset by health_status
+plant_numeric <- plant[sapply(plant, is.numeric)]
+split_data <- split(plant_numeric, plant$health_status)  # Split by health_status
+
+# Apply summary to each group
+lapply(split_data, summary)
+```
+
+```{r}
+# Select only numeric variables and include health_status for grouping
+numeric_vars <- plant %>%
+  select(-plant_id) %>%
+  pivot_longer(cols = -health_status, names_to = "variable", values_to = "value")
+
+# Create histograms of numeric variables grouped by health_status
+grouped_variables <- ggplot(numeric_vars, aes(x = value, fill = factor(health_status))) +
+  geom_histogram(position = "dodge", bins = 30, color = "black") +
+  facet_wrap(~ variable, scales = "free", ncol = 3) + 
+  labs(title = "Histograms of Numeric Variables by Health Status",
+       x = "Value",
+       y = "Count",
+       fill = "Health Status")
+
+ggsave("grouped_variables.png", plot = grouped_variables, width = 8, height = 6, dpi = 300)
+grouped_variables
+```
+
+
+
+# One-parameter model (Beta-Binomial conjugate model)
+
+## MCMC
+```{r}
+# Convert health status back to integer
+plant$health_status <- as.integer(plant$health_status)
+
+# Find number of healthy plants and the total nummber of plants
+y <- sum(plant$health_status)
+n <- nrow(plant)
+
+# Data list for Stan
+data <- list(
+  y = y,
+  n = n,
+  alpha = 1,  # Prior shape parameter alpha
+  beta = 1     # Prior shape parameter beta
+)
+```
+
+```{r}
+# Stan model code
+stan_code <- "
+data {
+  int y;  // Number of healthy plants
+  int n;  // Total number of plants
+  real alpha;  // Prior parameter for Beta distribution
+  real beta;   // Prior parameter for Beta distribution
+}
+
+parameters {
+  real<lower=0, upper=1> p;  // Probability of being healthy
+}
+
+model {
+  p ~ beta(alpha, beta);  // Prior: Beta distribution for p
+  y ~ binomial(n, p);  // Likelihood: Binomial distribution
+}
+
+generated quantities {
+  int simulated_y = binomial_rng(n, p);  // Simulated number of healthy plants
+}
+"
+
+# Compile the Stan model
+model_mcmc <- stan_model(model_code = stan_code)
+```
+
+```{r}
+# Fit the model
+fit_mcmc <- sampling(model_mcmc, data = data, iter = 2000, chains = 4)
+```
+
+```{r}
+# Print the summary of the model
+print(fit_mcmc)
+```
+
+
+
+### Checks
+```{r}
+# Traceplots
+mcmc_trace(fit_mcmc, pars = c("p", "simulated_y"))
+```
+
+```{r}
+# Save to png
+png("mcmc_traceplots.png", width = 2000, height = 1000, res = 300)
+
+# Traceplots
+mcmc_trace(fit_mcmc, pars = c("p", "simulated_y"))
+
+dev.off()
+```
+
+
+```{r}
+# Effective sample size
+summary(fit_mcmc)$summary[,"n_eff"]
+```
+
+```{r}
+# Autocorrelation plot
+stan_ac(fit_mcmc, pars = c("p", "simulated_y"), color = "skyblue")
+```
+
+```{r}
+# Save to png
+png("mcmc_acplots.png", width = 2000, height = 1000, res = 300)
+
+# Autocorrelation plot
+stan_ac(fit_mcmc, pars = c("p", "simulated_y"), color = "skyblue")
+
+dev.off()
+```
+
+
+
+```{r}
+# Extract the posterior samples
+posterior_samples <- extract(fit_mcmc)
+
+# Posterior predictive samples: flatten the simulated_y into a numeric vector
+simulated_y <- c(posterior_samples$simulated_y)
+
+# Plot histogram of posterior predictive samples
+hist(simulated_y, breaks = 30, col = rgb(0, 0, 1, 0.5), 
+     xlim = c(600, n), main = "Posterior Predictive Check", 
+     xlab = "Simulated Number of Healthy Plants", ylab = "Frequency")
+abline(v = y, col = "red", lwd = 2)  # Add vertical line for observed y
+
+# Interpretation
+cat("Observed number of healthy plants:", y, "\n")
+cat("Posterior predictive mean number of healthy plants:", mean(simulated_y), "\n")
+cat("Posterior predictive credible interval for number of healthy plants:", 
+    quantile(simulated_y, probs = c(0.025, 0.975)), "\n")
+
+
+```
+```{r}
+# Save to png
+png("mcmc_post_samples.png", width = 2000, height = 1700, res = 300)
+
+# Plot histogram of posterior predictive samples
+hist(simulated_y, breaks = 30, col = rgb(0, 0, 1, 0.5), 
+     xlim = c(600, n), main = "Posterior Predictive Check", 
+     xlab = "Simulated Number of Healthy Plants", ylab = "Frequency")
+abline(v = y, col = "red", lwd = 2)  # Add vertical line for observed y
+
+dev.off()
+```
+
+
+
+
+# Hierarchical model
+```{r}
+# Cluster plants based on predictors
+set.seed(123)
+kmeans_res <- kmeans(scale(plant[, c("temp", "humidity", "soil_moisture", "soil_ph", 
+                                     "nutrient_level", "light_intensity")]), centers = 4)
+plant$cluster <- factor(kmeans_res$cluster)
+plant$cluster <- as.factor(plant$cluster)
+```
+
+```{r}
+# Visualize the clusters with PCA
+pca_res <- prcomp(plant[, c("temp", "humidity", "soil_moisture", "soil_ph", "nutrient_level", "light_intensity")], scale = TRUE)
+
+# Add PCA scores to the data
+plant$pca1 <- pca_res$x[, 1]
+plant$pca2 <- pca_res$x[, 2]
+
+# Plot the clusters on the first two principal components
+clusters <- ggplot(plant, aes(x = pca1, y = pca2, color = cluster)) +
+  geom_point(size = 3) + 
+  scale_color_brewer(palette = "Set1") +
+  labs(title = "PCA of Plant Clusters", x = "PC1", y = "PC2")
+
+ggsave("clusters.png", plot = clusters, width = 6, height = 4, dpi = 300)
+clusters
+```
+
+```{r}
+hierarchical_code <- "
+data {
+  int<lower=0> n;                  // Number of plants
+  int<lower=0, upper=1> y[n];      // Health status (binary)
+  int<lower=1> k;                  // Number of predictors
+  matrix[n, k] X;                  // Predictor matrix (k predictors: Temp, Humidity, etc.)
+  int<lower=1> J;                  // Number of clusters (latent groups)
+  int<lower=1, upper=J> cluster[n]; // Cluster assignment for each plant
+}
+
+parameters {
+  real alpha[J];                  // Random intercepts for each cluster
+  vector[k] beta;                 // Fixed effects for predictors
+  real<lower=0> sigma_alpha;      // Standard deviation for random intercepts
+}
+
+model {
+  // Priors
+  beta ~ normal(0, 5);            // Weakly informative prior for predictors
+  alpha ~ normal(0, sigma_alpha); // Random intercepts for clusters
+  sigma_alpha ~ cauchy(0, 2);     // Prior for standard deviation
+  
+  // Likelihood
+  for (i in 1:n) {
+    y[i] ~ bernoulli_logit(alpha[cluster[i]] + X[i] * beta);
+  }
+}
+
+generated quantities {
+  int simulated_y;  // Total number of healthy plants (simulated)
+  
+  // Simulate the total number of healthy plants using Bernoulli trials directly
+  simulated_y = 0;
+  for (i in 1:n) {
+    // Calculate the probability for plant i (log-odds transformed to probability)
+    real p = inv_logit(alpha[cluster[i]] + dot_product(X[i], beta));  // Use inv_logit for probability
+    
+    // Simulate a binary outcome for plant i
+    simulated_y += bernoulli_rng(p);  // bernoulli_rng gives 0 or 1 based on p
+  }
+}
+"
+
+# Compile the model
+hierarchical_model <- stan_model(model_code = hierarchical_code)
+```
+
+```{r}
+# Define the data
+data_hierarchical <- list(
+  n = nrow(plant),  # Number of plants
+  y = plant$health_status,  # Binary health status
+  k = 6,  # Number of predictors
+  X = scale(plant[, c("temp", "humidity", "soil_moisture", "soil_ph", "nutrient_level", "light_intensity")]),  # Scaled predictors
+  J = length(unique(plant$cluster)),  # Number of clusters
+  cluster = as.integer(plant$cluster)  # Cluster assignments as integers
+)
+```
+
+```{r}
+# Fit the model
+fit_hierarchical <- sampling(
+  hierarchical_model,
+  data = data_hierarchical,
+  iter = 2000,           # Number of iterations per chain
+  chains = 4,            # Number of chains
+  control = list(
+    adapt_delta = 0.99,   # Higher adapt_delta for stability
+    max_treedepth = 15    # Increase max tree depth to avoid divergent transitions
+  ),
+  cores = 4,
+  seed = 123             # For reproducibility
+)
+```
+
+```{r}
+print(fit_hierarchical, probs = c(0.025, 0.5, 0.975))  # Posterior mean and credible intervals
+```
+
+
+
+### Checks
+
+```{r}
+traceplot(fit_hierarchical, pars = c("alpha", "beta", "sigma_alpha", "simulated_y"))
+```
+
+```{r}
+# Save to png
+png("hierarchical_traceplots.png", width = 2000, height = 1700, res = 300)
+
+traceplot(fit_hierarchical, pars = c("alpha", "beta", "sigma_alpha", "simulated_y"))
+
+dev.off()
+```
+
+```{r}
+# Effective sample size
+summary(fit_hierarchical)$summary[,"n_eff"]
+```
+
+```{r}
+# Autocorrelation plot
+stan_ac(fit_hierarchical, pars = c("alpha", "beta", "sigma_alpha", "simulated_y"), color = "skyblue")
+```
+
+```{r}
+# Save to png
+png("hierarchical_acplots.png", width = 2000, height = 1700, res = 300)
+
+# Autocorrelation plot
+stan_ac(fit_hierarchical, pars = c("alpha", "beta", "sigma_alpha", "simulated_y"), color = "skyblue")
+
+dev.off()
+```
+
+
+```{r}
+# Extract the posterior samples
+posterior_samples <- extract(fit_hierarchical)
+
+# Posterior predictive samples: flatten the simulated_y into a numeric vector
+simulated_y <- c(posterior_samples$simulated_y)
+
+# Plot histogram of posterior predictive samples
+hist(simulated_y, breaks = 30, col = rgb(0, 0, 1, 0.5), 
+     xlim = c(600, n), main = "Posterior Predictive Check", 
+     xlab = "Simulated Number of Healthy Plants", ylab = "Frequency")
+abline(v = y, col = "red", lwd = 2)  # Add vertical line for observed y
+
+# Interpretation
+cat("Observed number of healthy plants:", y, "\n")
+cat("Posterior predictive mean number of healthy plants:", mean(simulated_y), "\n")
+cat("Posterior predictive credible interval for number of healthy plants:", 
+    quantile(simulated_y, probs = c(0.025, 0.975)), "\n")
+```
+```{r}
+# Save to png
+png("hierarchical_post_samples.png", width = 2000, height = 1700, res = 300)
+
+# Plot histogram of posterior predictive samples
+hist(simulated_y, breaks = 30, col = rgb(0, 0, 1, 0.5), 
+     xlim = c(600, n), main = "Posterior Predictive Check", 
+     xlab = "Simulated Number of Healthy Plants", ylab = "Frequency")
+abline(v = y, col = "red", lwd = 2)  # Add vertical line for observed y
+
+dev.off()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
